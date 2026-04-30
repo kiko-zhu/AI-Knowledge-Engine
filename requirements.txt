@@ -1,0 +1,8 @@
+scikit-learn
+jieba3k
+openai
+uvicorn
+pydantic-settings
+sqlalchemy
+fastapi
+pydantic
