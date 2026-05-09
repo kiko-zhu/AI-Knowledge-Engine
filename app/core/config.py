@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.deepseek.com"
     # llm_model: str = "deepseek-chat"
     llm_model: str = "deepseek-v4-flash"
-    send_code_root: str = r"D:\Project_text\send_code_api\info\projects\domain_lib"
+    send_code_root: str = r"C:\Project_text\send_code_api\info\projects\domain_lib"
 
     class Config:
         """
