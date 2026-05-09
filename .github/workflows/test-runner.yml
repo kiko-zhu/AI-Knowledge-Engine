@@ -1,4 +1,4 @@
-name: Test WinServer Runner
+name: Deploy to WinServer
 
 on:
   push:
@@ -6,14 +6,11 @@ on:
       - main
 
 jobs:
-  test:
+  deploy:
     runs-on: [self-hosted, Windows, x64, winserver]
 
     steps:
-      - name: Test runner
+      - name: Deploy on WinServer
         shell: powershell
         run: |
-          Write-Host "GitHub Actions Runner 正常运行"
-          hostname
-          whoami
-          Get-Location
+          powershell -ExecutionPolicy Bypass -File C:\apps\AI-Knowledge-Engine\deploy.ps1
