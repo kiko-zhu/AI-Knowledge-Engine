@@ -10,7 +10,35 @@ jobs:
     runs-on: [self-hosted, Windows, x64, winserver]
 
     steps:
-      - name: Deploy on WinServer
+      - name: Checkout latest code
+        uses: actions/checkout@v4
+
+      - name: Sync code to deploy directory
+        shell: powershell
+        run: |
+          $source = "$env:GITHUB_WORKSPACE"
+          $target = "C:\apps\AI-Knowledge-Engine"
+
+          Write-Host "源码目录: $source"
+          Write-Host "部署目录: $target"
+
+          if (!(Test-Path $target)) {
+            New-Item -ItemType Directory -Path $target | Out-Null
+          }
+
+          robocopy $source $target /MIR /XD .git .github .venv __pycache__ /XF deploy.ps1
+
+          $code = $LASTEXITCODE
+
+          if ($code -le 7) {
+            Write-Host "代码同步成功，robocopy exit code: $code"
+            exit 0
+          } else {
+            Write-Host "代码同步失败，robocopy exit code: $code"
+            exit $code
+          }
+
+      - name: Run deploy script
         shell: powershell
         run: |
           powershell -ExecutionPolicy Bypass -File C:\apps\AI-Knowledge-Engine\deploy.ps1
