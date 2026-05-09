@@ -1,0 +1,56 @@
+name: Deploy to WinServer
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, Windows, x64, winserver]
+
+    steps:
+      - name: Download latest code by ZIP
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $zipUrl = "https://github.com/kiko-zhu/AI-Knowledge-Engine/archive/refs/heads/main.zip"
+          $workDir = "C:\actions-deploy-temp"
+          $zipFile = "$workDir\AI-Knowledge-Engine.zip"
+          $extractDir = "$workDir\extract"
+          $sourceDir = "$extractDir\AI-Knowledge-Engine-main"
+          $targetDir = "C:\apps\AI-Knowledge-Engine"
+
+          Write-Host "清理临时目录..."
+          Remove-Item -Recurse -Force $workDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $workDir | Out-Null
+          New-Item -ItemType Directory -Path $extractDir | Out-Null
+
+          Write-Host "下载最新代码 ZIP..."
+          Invoke-WebRequest -Uri $zipUrl -OutFile $zipFile
+
+          Write-Host "解压 ZIP..."
+          Expand-Archive -Path $zipFile -DestinationPath $extractDir -Force
+
+          Write-Host "同步代码到部署目录..."
+          if (!(Test-Path $targetDir)) {
+            New-Item -ItemType Directory -Path $targetDir | Out-Null
+          }
+
+          robocopy $sourceDir $targetDir /MIR /XD .git .github .venv __pycache__ /XF deploy.ps1 /R:3 /W:5
+
+          $code = $LASTEXITCODE
+
+          if ($code -le 7) {
+            Write-Host "代码同步成功，robocopy exit code: $code"
+            exit 0
+          } else {
+            Write-Host "代码同步失败，robocopy exit code: $code"
+            exit $code
+          }
+
+      - name: Run deploy script
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File C:\apps\AI-Knowledge-Engine\deploy.ps1
