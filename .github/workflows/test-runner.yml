@@ -10,26 +10,37 @@ jobs:
     runs-on: [self-hosted, Windows, x64, winserver]
 
     steps:
-      - name: Checkout latest code
-        uses: actions/checkout@v4
-
-      - name: Sync code to deploy directory
+      - name: Download latest code by ZIP
         shell: powershell
         run: |
-          $source = "$env:GITHUB_WORKSPACE"
-          $target = "C:\apps\AI-Knowledge-Engine"
+          $ErrorActionPreference = "Stop"
 
-          Write-Host "源码目录: $source"
-          Write-Host "部署目录: $target"
+          $zipUrl = "https://github.com/kiko-zhu/AI-Knowledge-Engine/archive/refs/heads/main.zip"
+          $workDir = "C:\actions-deploy-temp"
+          $zipFile = "$workDir\AI-Knowledge-Engine.zip"
+          $extractDir = "$workDir\extract"
+          $sourceDir = "$extractDir\AI-Knowledge-Engine-main"
+          $targetDir = "C:\apps\AI-Knowledge-Engine"
 
-          if (!(Test-Path $target)) {
-            New-Item -ItemType Directory -Path $target | Out-Null
+          Write-Host "清理临时目录..."
+          Remove-Item -Recurse -Force $workDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $workDir | Out-Null
+          New-Item -ItemType Directory -Path $extractDir | Out-Null
+
+          Write-Host "下载最新代码 ZIP..."
+          Invoke-WebRequest -Uri $zipUrl -OutFile $zipFile
+
+          Write-Host "解压 ZIP..."
+          Expand-Archive -Path $zipFile -DestinationPath $extractDir -Force
+
+          Write-Host "同步代码到部署目录..."
+          if (!(Test-Path $targetDir)) {
+            New-Item -ItemType Directory -Path $targetDir | Out-Null
           }
 
-          robocopy $source $target /MIR /XD .git .github .venv __pycache__ /XF deploy.ps1
+          robocopy $sourceDir $targetDir /MIR /XD .git .github .venv __pycache__ /XF deploy.ps1
 
           $code = $LASTEXITCODE
-
           if ($code -le 7) {
             Write-Host "代码同步成功，robocopy exit code: $code"
             exit 0
