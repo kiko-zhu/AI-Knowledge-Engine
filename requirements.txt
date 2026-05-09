@@ -6,3 +6,5 @@ pydantic-settings
 sqlalchemy
 fastapi
 pydantic
+python-multipart
+loguru
