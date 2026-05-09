@@ -1,0 +1,19 @@
+name: Test WinServer Runner
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: [self-hosted, Windows, x64, winserver]
+
+    steps:
+      - name: Test runner
+        shell: powershell
+        run: |
+          Write-Host "GitHub Actions Runner 正常运行"
+          hostname
+          whoami
+          Get-Location
