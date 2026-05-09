@@ -3,6 +3,12 @@ import re
 
 CODE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Z][A-Z0-9_]{1,})(?![A-Za-z0-9_])")
 
+SEND_DOMAIN_CODES = {
+    "BG", "BW", "CL", "CV", "DM", "DS", "EG", "EX", "FW", "GV",
+    "LB", "MA", "MI", "OM", "PC", "PP", "RE", "SE", "TA", "TE",
+    "TS", "TX", "VS",
+}
+
 
 def extract_target_domain_code(query: str) -> str | None:
     """
@@ -14,8 +20,12 @@ def extract_target_domain_code(query: str) -> str | None:
     if match:
         return match.group(1)
 
+    for token in CODE_TOKEN_RE.findall(value):
+        if token in SEND_DOMAIN_CODES:
+            return token
+
     match = re.search(r"(?<![A-Z0-9_])([A-Z]{2})(?![A-Z0-9_])", value)
-    if match and "域" in value:
+    if match and match.group(1) in SEND_DOMAIN_CODES:
         return match.group(1)
 
     return None
@@ -31,6 +41,8 @@ def extract_field_tokens(query: str) -> list[str]:
 
     for token in CODE_TOKEN_RE.findall(value):
         if len(token) < 3:
+            continue
+        if token in SEND_DOMAIN_CODES:
             continue
         if domain_code and token == domain_code:
             continue

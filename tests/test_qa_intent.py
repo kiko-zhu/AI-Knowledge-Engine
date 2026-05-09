@@ -22,6 +22,18 @@ class QaIntentTest(unittest.TestCase):
         self.assertEqual(extract_target_domain_code(query), "VS")
         self.assertEqual(extract_field_tokens(query), ["VSORRESU"])
 
+    def test_extracts_standalone_domain_code_without_chinese_suffix(self):
+        query = "PC 的 PCLLOQ 怎么算"
+
+        self.assertEqual(extract_target_domain_code(query), "PC")
+        self.assertEqual(extract_field_tokens(query), ["PCLLOQ"])
+
+    def test_dependency_domains_are_not_field_tokens(self):
+        query = "EX 哪些字段在 PC 里面要用"
+
+        self.assertEqual(extract_target_domain_code(query), "EX")
+        self.assertEqual(extract_field_tokens(query), [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,10 +8,12 @@ from fastapi import HTTPException
 from sqlalchemy import text
 
 from app.core.llm import chat
+from app.modules.code_index.service import SendCodeIndexService
 from app.modules.qa.field_logic import build_field_logic_payload_from_contexts
 from app.modules.qa.field_logic import has_substantive_field_logic
 from app.modules.qa.field_logic import normalize_field_logic_payload
 from app.modules.qa.intent import CODE_TOKEN_RE
+from app.modules.qa.intent import SEND_DOMAIN_CODES
 from app.modules.qa.intent import extract_field_tokens as extract_query_field_tokens
 from app.modules.qa.intent import extract_target_domain_code as extract_query_domain_code
 from app.modules.evaluation.service import EvaluationService
@@ -30,12 +32,12 @@ class QaService:
     HISTORY_WINDOW = 6
     FILE_SPEC_FLAGS = ["文件路径", "路径", "文件格式", "格式", "输出文件"]
     EXPLANATION_FLAGS = ["解释", "中文说", "中文解释", "用中文", "说一下", "讲一下", "逻辑", "怎么计算", "怎么算", "含义"]
-    TEACHING_FLAGS = ["更能理解", "更好理解", "更容易理解", "更容易懂", "通俗", "讲给别人", "怎么讲", "换种说法", "更好解释", "让别人理解", "怎么让别人"]
+    TEACHING_FLAGS = ["更能理解", "更好理解", "更容易理解", "更容易懂", "通俗", "大白话", "白话", "讲给别人", "怎么讲", "换种说法", "更好解释", "让别人理解", "怎么让别人"]
     VISUALIZATION_FLAGS = ["画图", "图示", "流程图", "图解", "可视化", "画一下", "画出来", "图形"]
     WORKFLOW_FLAGS = ["整个流程", "整体流程", "完整流程", "流程是怎么样", "流程是什么", "从输入到输出", "用自己的话概括", "整体过程", "全流程"]
     DETAILED_FLAGS = ["详细说明", "详细讲", "展开说", "展开讲", "具体讲讲", "具体说明", "详细一点", "说详细点", "细讲", "详细描述"]
     DOMAIN_RELATION_FLAGS = ["什么关系", "有什么关系", "之间有什么联系", "之间的联系", "与其他域", "和其他域", "依赖哪些域", "被哪些域依赖", "和哪些域有关", "有什么联系"]
-    DOMAIN_LOGIC_FLAGS = ["逻辑是什么", "主要逻辑", "核心逻辑", "转换逻辑", "是做什么的", "主要做什么"]
+    DOMAIN_LOGIC_FLAGS = ["逻辑是什么", "整体逻辑", "主要逻辑", "核心逻辑", "转换逻辑", "是做什么的", "主要做什么"]
     FIELD_LOGIC_FLAGS = ["怎么计算", "如何计算", "怎么算", "如何处理", "怎么处理", "怎么生成", "如何生成", "计算逻辑", "处理逻辑", "生成逻辑", "来源逻辑", "是什么", "代表什么", "含义是什么"]
     CODE_TOKEN_RE = CODE_TOKEN_RE
 
@@ -121,7 +123,13 @@ class QaService:
         这类问题不能只看单个域文档，还要反向找哪些域引用了该域。
         """
         value = (query or "").strip().upper()
-        return "域" in value and any(flag in value for flag in cls.DOMAIN_RELATION_FLAGS)
+        dependency_flags = ["哪些字段", "哪些变量", "使用", "要用", "引用", "依赖"]
+        has_multiple_domains = len(cls.extract_domain_codes(value)) >= 2
+        return (
+            "域" in value and any(flag in value for flag in cls.DOMAIN_RELATION_FLAGS)
+        ) or (
+            has_multiple_domains and any(flag in value for flag in dependency_flags)
+        )
 
     @classmethod
     def is_domain_logic_query(cls, query: str) -> bool:
@@ -140,12 +148,12 @@ class QaService:
         """
         if cls.is_field_logic_query(query):     # 字段逻辑
             return "field_logic"
-        if cls.is_domain_relation_query(query): # 域关系
-            return "domain_relation"
         if cls.is_workflow_query(query):        # 流程总结
             return "workflow_summary"
         if cls.is_domain_logic_query(query):    # 域逻辑
             return "domain_logic"
+        if cls.is_domain_relation_query(query): # 域关系
+            return "domain_relation"
         if cls.is_file_spec_query(query):       # 文档输出文件
             return "file_spec"
         if cls.is_explanation_query(query):     # 中文说明
@@ -190,6 +198,36 @@ class QaService:
         否则检索会被历史上下文带偏。
         """
         return extract_query_field_tokens(query)
+
+    @classmethod
+    def extract_domain_codes(cls, query: str) -> list[str]:
+        """
+        提取问题里出现的域代码，保持出现顺序并去重。
+        """
+        value = (query or "").upper()
+        codes = []
+        for match in re.finditer(r"(?<![A-Z0-9])([A-Z]{2,})(?=域)", value):
+            code = match.group(1)
+            if code in SEND_DOMAIN_CODES and code not in codes:
+                codes.append(code)
+        for token in CODE_TOKEN_RE.findall(value):
+            if token in SEND_DOMAIN_CODES and token not in codes:
+                codes.append(token)
+        return codes
+
+    @classmethod
+    def extract_dependency_domains(cls, query: str) -> tuple[str | None, str | None]:
+        """
+        从“EX哪些字段是在PC里面要用的”这类问题中提取被使用域和使用方域。
+        返回 used_domain, target_domain。
+        """
+        codes = cls.extract_domain_codes(query)
+        if len(codes) >= 2:
+            value = (query or "").upper()
+            if any(flag in value for flag in ["用", "使用", "引用", "依赖", "要用"]):
+                return codes[0], codes[1]
+            return codes[1], codes[0]
+        return None, None
 
     @classmethod
     def should_rewrite_query(cls, query: str, history_messages: list | None = None) -> bool:
@@ -240,6 +278,21 @@ class QaService:
         if not conversation:
             raise HTTPException(status_code=404, detail="Conversation not found")
         return conversation
+
+    @classmethod
+    def serialize_conversation(cls, conversation, last_message=None):
+        """
+        将会话记录转换为接口响应结构。
+        """
+        return {
+            "id": conversation.id,
+            "title": conversation.title or "新会话",
+            "kb_id": conversation.kb_id,
+            "tone": conversation.tone,
+            "created_at": cls._format_dt(conversation.created_at),
+            "updated_at": cls._format_dt(conversation.updated_at),
+            "last_message": last_message.content[:80] if last_message else None
+        }
 
     @classmethod
     def merge_adjacent_contexts(cls, items: list):
@@ -1387,21 +1440,21 @@ JSON schema:
         try:
             raw = (chat(prompt) or "").strip()
         except Exception:
-            return None
+            return None, None
 
         if not raw:
-            return None
+            return None, None
 
         try:
             payload = json.loads(raw)
         except Exception:
             match = re.search(r"\{[\s\S]*\}", raw)
             if not match:
-                return None
+                return None, None
             try:
                 payload = json.loads(match.group(0))
             except Exception:
-                return None
+                return None, None
 
         if not isinstance(payload, dict):
             return None, None
@@ -1563,6 +1616,783 @@ JSON schema:
                 sections.append(f"{title}\n" + "\n".join(f"- {item}" for item in cleaned))
 
         return "\n\n".join(sections).strip() or None
+
+    @classmethod
+    def split_domain_logic_examples(cls, items: list[str] | None) -> list[str]:
+        """
+        从源码索引的长句中提取字段示例，供业务化模板使用。
+        """
+        examples = []
+        for item in items or []:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            if "关键字段赋值示例：" in text:
+                text = text.split("关键字段赋值示例：", 1)[1]
+            parts = [part.strip(" ；;") for part in re.split(r"[；;]\s*", text) if part.strip(" ；;")]
+            for part in parts:
+                if re.match(r"^[A-Z][A-Z0-9_]*:\s*行\s*\d+", part):
+                    examples.append(part)
+        return examples
+
+    @classmethod
+    def clean_domain_role(cls, domain: str, role: str | None) -> str:
+        """
+        把源码索引的技术性角色描述收敛成用户可读的域定位。
+        """
+        text = (role or "").strip()
+        if "；" in text:
+            text = text.split("；", 1)[0]
+        return text or f"{domain} 域用于生成 SEND {domain}.xpt 数据集。"
+
+    @classmethod
+    def extract_dataframe_names_from_domain_logic(cls, raw_inputs: list[str]) -> list[str]:
+        """
+        从源码索引输入描述中提取 df_* 名称。
+        """
+        names = []
+        for item in raw_inputs or []:
+            for name in re.findall(r"\bdf_[A-Za-z0-9_]+\b", item):
+                if name not in names:
+                    names.append(name)
+        return names
+
+    @classmethod
+    def build_domain_input_summary(cls, domain: str, raw_inputs: list[str]) -> list[str]:
+        """
+        把输入字段证据压缩成高层输入分类。
+        域级逻辑问题不应该把每个 DataFrame 字段铺成主答案。
+        """
+        domain = (domain or "").upper()
+        dataframes = cls.extract_dataframe_names_from_domain_logic(raw_inputs)
+        main_data = []
+        reference_data = []
+        config_data = []
+        internal_or_other = []
+
+        config_names = {
+            "df_terminology", "df_domain_desc", "df_variables", "df_safety_info",
+            "df_treatment_info", "df_tk_info", "df_tk_time", "df_study_info"
+        }
+        internal_names = {"df_res", "df_res_sort", "df_group", "df_group_phase"}
+
+        for name in dataframes:
+            suffix = name.removeprefix("df_").upper()
+            if name in internal_names:
+                continue
+            if (
+                name in config_names
+                or "terminology" in name.lower()
+                or "setup" in name.lower()
+                or name.lower().endswith("test")
+                or name.lower().endswith("testcd")
+            ):
+                config_data.append(name)
+            elif suffix == domain or name in {"df_domain", "df_extra"}:
+                main_data.append(name)
+            elif re.fullmatch(r"[A-Z]{2,}", suffix):
+                if suffix == domain:
+                    main_data.append(name)
+                else:
+                    reference_data.append(name)
+            else:
+                internal_or_other.append(name)
+
+        items = []
+        if main_data:
+            items.append("主转换数据：" + ", ".join(main_data))
+        if reference_data:
+            items.append("跨域参考数据：" + ", ".join(reference_data))
+        if config_data:
+            items.append("配置、术语或域描述：" + ", ".join(config_data))
+        if internal_or_other:
+            items.append("其他辅助输入：" + ", ".join(internal_or_other[:6]))
+        return items
+
+    @classmethod
+    def extract_field_example_map(cls, examples: list[str]) -> dict[str, str]:
+        """
+        把 `FIELD: 行 N，expr` 示例转成字段到表达式的映射。
+        """
+        result = {}
+        for item in examples or []:
+            match = re.match(r"^([A-Z][A-Z0-9_]*):\s*行\s*\d+，(.+)$", str(item or "").strip())
+            if match:
+                field = match.group(1)
+                expr = match.group(2).strip()
+                if expr == field:
+                    continue
+                result.setdefault(field, []).append(expr)
+        return result
+
+    @classmethod
+    def summarize_field_expressions(cls, field: str, expressions: list[str]) -> str:
+        """
+        对同一字段的多个赋值分支做业务化概括。
+        """
+        cleaned = []
+        for expr in expressions or []:
+            text = str(expr or "").strip()
+            if not text or text in {"''", '""', "None", "np.nan", "nan"}:
+                continue
+            if text not in cleaned:
+                cleaned.append(text)
+        if not cleaned:
+            return ""
+
+        field = (field or "").upper()
+        if field.endswith("ORRES"):
+            values = []
+            if any("float(result_value)" in expr or "float(" in expr and "result_value" in expr for expr in cleaned):
+                values.append("数值结果")
+            if any(expr == "result_value" or "result_value" in expr and "float" not in expr for expr in cleaned):
+                values.append("原始文本结果")
+            if any("'BLOQ'" in expr or '"BLOQ"' in expr for expr in cleaned):
+                values.append("BLOQ")
+            if any("'N.R.'" in expr or '"N.R."' in expr or "N.R." in expr for expr in cleaned):
+                values.append("N.R.")
+            numeric_expr = next((expr for expr in cleaned if "parse_" in expr or "item[" in expr and "Result" in expr), "")
+            if numeric_expr:
+                values.append(cls.summarize_expression(numeric_expr))
+            if values:
+                return "按结果类型分支生成：" + "；".join(values)
+
+        if field.endswith("STRESN"):
+            if any("re.search" in expr or "Decimal" in expr for expr in cleaned):
+                return "如果标准化结果中包含数字，则转换为数值型；否则为空"
+
+        if field.endswith("STRESC"):
+            parts = []
+            if any("str(" in expr for expr in cleaned):
+                parts.append("通常取原始结果的字符值")
+            if any("Not Recorded" in expr for expr in cleaned):
+                parts.append("结果为 N.R. 时填 Not Recorded")
+            if parts:
+                return "；".join(parts)
+
+        if field.endswith("STRESU"):
+            if any(expr.endswith("ORRESU") for expr in cleaned):
+                return "与原始结果单位保持一致"
+
+        if field.endswith("DTC"):
+            dtc_parts = [cls.summarize_expression(expr) for expr in cleaned]
+            return "；".join(part for part in dtc_parts if part)
+
+        if field.endswith("RFTDTC"):
+            if any("EX" in expr.upper() or "ex_" in expr.lower() or "PCRFTDTC" in expr for expr in cleaned):
+                return "根据匹配到的给药参考时间生成"
+
+        summarized = [cls.summarize_expression(expr) for expr in cleaned[:3]]
+        return "；".join(item for item in summarized if item)
+
+    @classmethod
+    def summarize_expression(cls, expr: str) -> str:
+        """
+        把源码表达式压缩成更适合业务说明的短语。
+        """
+        text = str(expr or "").strip()
+        text = re.sub(r"\s+", " ", text)
+        text = text.replace(".iloc[0]", "")
+        decimal_delta = re.match(
+            r"str\(Decimal\(item\[['\"]([^'\"]+)['\"]\]\)\s*-\s*Decimal\(previous_item\[['\"]([^'\"]+)['\"]\]\)\)",
+            text
+        )
+        if decimal_delta and decimal_delta.group(1) == decimal_delta.group(2):
+            return f"当前记录的 {decimal_delta.group(1)} 减去上一条记录的 {decimal_delta.group(2)}"
+
+        item_value = re.fullmatch(r"item\[['\"]([^'\"]+)['\"]\]", text)
+        if item_value:
+            return f"取当前记录的 {item_value.group(1)}"
+
+        previous_date_parse = re.match(
+            r"datetime\.datetime\.strptime\(previous_item\[['\"]([^'\"]+)['\"]\],\s*['\"]([^'\"]+)['\"]\)\.strftime\(['\"]([^'\"]+)['\"]\)",
+            text
+        )
+        if previous_date_parse:
+            return f"从上一条记录的 {previous_date_parse.group(1)} 解析日期"
+
+        date_diff = re.match(
+            r"float\(\(datetime\.datetime\.strptime\(previous_item\[['\"]([^'\"]+)['\"]\].+reference_day_dict\[item\[['\"]([^'\"]+)['\"]\]\]\)\.days\)",
+            text
+        )
+        if date_diff:
+            return f"用上一条记录的 {date_diff.group(1)} 相对参考日计算研究日"
+
+        mapping = re.match(
+            r"(df_[A-Za-z0-9_]+)\[\((df_[A-Za-z0-9_]+)\[['\"]([^'\"]+)['\"]\]\s*==\s*([^\]]+?)\)\]\[['\"]([^'\"]+)['\"]\]",
+            text
+        )
+        if mapping:
+            return f"根据 {cls.summarize_expression(mapping.group(4))} 到 {mapping.group(1)} 映射 {mapping.group(5)}"
+
+        simple_lookup = re.match(
+            r"(df_[A-Za-z0-9_]+)\[(df_[A-Za-z0-9_]+)\[['\"]([^'\"]+)['\"]\]\s*==\s*([^\]]+?)\]\[['\"]([^'\"]+)['\"]\]",
+            text
+        )
+        if simple_lookup:
+            return f"根据 {cls.summarize_expression(simple_lookup.group(4))} 到 {simple_lookup.group(1)} 映射 {simple_lookup.group(5)}"
+
+        if text.startswith("str(") and text.endswith(")"):
+            inner = text[len("str("):-1]
+            if re.fullmatch(r"[A-Z][A-Z0-9_]*", inner):
+                return f"取 {inner} 的字符值"
+
+        if text.startswith("int(Decimal(str("):
+            return "如果标准化结果中包含数字，则转换为数值型；否则为空"
+
+        if "strftime('%Y-%m-%dT%H:%M')" in text or 'strftime("%Y-%m-%dT%H:%M")' in text:
+            return "格式化为 ISO 日期时间"
+
+        if "Study Day" in text:
+            return "生成 Study Day 名义时间点"
+
+        if text in {"'Predose'", '"Predose"'}:
+            return "生成 Predose 时间点"
+
+        if "Postdose" in text:
+            return "根据 Hour/Minute 生成 Postdose 时间点"
+
+        if text.startswith("float(") and text.endswith(")"):
+            inner = text[len("float("):-1]
+            if re.fullmatch(r"[A-Z][A-Z0-9_]*", inner):
+                return f"将 {inner} 转为数值"
+        if len(text) > 120:
+            text = text[:117].rstrip() + "..."
+        return text
+
+    @classmethod
+    def build_business_core_steps(cls, domain: str, examples: list[str], preprocessing_line: str, field_count_line: str) -> list[str]:
+        """
+        根据字段示例生成通用业务步骤。
+        """
+        domain = (domain or "").upper()
+        field_map = cls.extract_field_example_map(examples)
+        steps = []
+        if preprocessing_line:
+            steps.append("先整理主数据：完成过滤、缺失值处理、排序、透视或重命名等预处理，为逐条生成 SEND 记录做准备。")
+        else:
+            steps.append("先读取主数据和配置数据，为后续逐条生成 SEND 记录做准备。")
+
+        test_fields = [field for field in [f"{domain}TESTCD", f"{domain}TEST", f"{domain}CAT"] if field in field_map]
+        if test_fields:
+            steps.append(
+                "再做测试项/分类映射："
+                + "；".join(f"{field}：{cls.summarize_field_expressions(field, field_map[field])}" for field in test_fields)
+            )
+
+        result_fields = [
+            field for field in [f"{domain}ORRES", f"{domain}ORRESU", f"{domain}STRESC", f"{domain}STRESN", f"{domain}STRESU"]
+            if field in field_map
+        ]
+        if result_fields:
+            steps.append(
+                "然后生成原始结果和标准化结果："
+                + "；".join(f"{field}：{cls.summarize_field_expressions(field, field_map[field])}" for field in result_fields)
+            )
+
+        id_fields = [field for field in ["USUBJID", f"{domain}SEQ"] if field in field_map]
+        if id_fields:
+            steps.append(
+                "同时生成记录标识和顺序字段："
+                + "；".join(f"{field}：{cls.summarize_field_expressions(field, field_map[field])}" for field in id_fields)
+            )
+
+        if field_count_line:
+            steps.append(field_count_line.replace("源码中识别到", "依据源码可追踪到"))
+
+        if len(steps) <= 1 and examples:
+            steps.append("关键字段派生证据：" + "；".join(examples[:4]))
+        return steps
+
+    @classmethod
+    def build_business_time_steps(cls, domain: str, raw_time: list[str]) -> list[str]:
+        """
+        只保留目标域时间/研究日/基线字段的赋值说明，过滤普通 Date/Time 读取行。
+        """
+        domain = (domain or "").upper()
+        target_prefixes = (
+            f"{domain}DTC", f"{domain}ENDTC", f"{domain}DY", f"{domain}ENDY",
+            f"{domain}NOMDY", f"{domain}NOMLBL", f"{domain}TPT", f"{domain}TPTNUM",
+            f"{domain}ELTM", f"{domain}RFTDTC", f"{domain}BLFL", "VISITDY",
+        )
+        steps = []
+        seen = set()
+        tpt_modes = set()
+        for item in raw_time or []:
+            text = str(item or "").strip()
+            field_match = re.match(r"^([A-Z][A-Z0-9_]*):\s*行\s*\d+，(.+)$", text)
+            if not field_match:
+                continue
+            field = field_match.group(1)
+            expr_raw = field_match.group(2).strip()
+            if expr_raw == field:
+                continue
+            expr = cls.summarize_field_expressions(field, [expr_raw])
+            if not field.startswith(target_prefixes):
+                continue
+            if field.endswith("TPT"):
+                if "Predose" in expr:
+                    tpt_modes.add("Hour 为 0 或给药前记录生成 Predose")
+                    continue
+                if "Postdose" in expr:
+                    tpt_modes.add("非 0 Hour/Minute 记录生成 Postdose 时间点")
+                    continue
+                if "Study Day" in expr:
+                    tpt_modes.add("恢复期或名义日记录生成 Study Day 时间点")
+                    continue
+            line = f"{field}：{expr}"
+            if line not in seen:
+                steps.append(line)
+                seen.add(line)
+        if tpt_modes:
+            steps.insert(0, "时间点规则：" + "；".join(sorted(tpt_modes)))
+        if steps:
+            return ["时间、研究日、名义日、时间点和基线字段按目标域字段赋值归集。"] + steps[:8]
+        return []
+
+    @classmethod
+    def build_business_output_steps(cls, raw_outputs: list[str]) -> list[str]:
+        """
+        输出结果只讲数据集和主要字段，不展开排序清理代码行。
+        """
+        output_field_line = next((item for item in raw_outputs if item.startswith("输出字段：")), "")
+        if not output_field_line:
+            return []
+        fields = [field.strip() for field in output_field_line.replace("输出字段：", "", 1).split(",") if field.strip()]
+        steps = []
+        if fields:
+            steps.append("最终生成 SEND 结果数据集，主要字段包括：" + ", ".join(fields[:24]))
+        if len(fields) > 24:
+            steps.append(f"其余字段还有 {len(fields) - 24} 个，完整字段以源码 columns_list/输出模板为准。")
+        return steps
+
+    @classmethod
+    def build_domain_dependency_summary(cls, raw_deps: list[str]) -> list[str]:
+        """
+        把依赖字段清单压缩成依赖来源摘要。
+        """
+        external_domains = []
+        config_sources = []
+        other_sources = []
+        for item in raw_deps or []:
+            text = str(item or "").strip()
+            match = re.match(r"读取\s+([A-Z]{2,})\s+域字段：(.+)", text)
+            if match:
+                domain = match.group(1)
+                fields = [field.strip() for field in match.group(2).split(",") if field.strip()]
+                external_domains.append(f"{domain} 域：{', '.join(fields[:8])}")
+                continue
+
+            match = re.match(r"读取\s+(df_[A-Za-z0-9_]+)\s+字段：(.+)", text)
+            if match:
+                name = match.group(1)
+                fields = [field.strip() for field in match.group(2).split(",") if field.strip()]
+                line = f"{name}：{', '.join(fields[:8])}"
+                if any(token in name.lower() for token in [
+                    "terminology", "domain_desc", "variables", "safety", "tk_", "treatment", "study", "test", "testcd"
+                ]):
+                    config_sources.append(line)
+                else:
+                    other_sources.append(line)
+
+        result = []
+        if external_domains:
+            result.append("跨域依赖：" + "；".join(external_domains[:6]))
+        if config_sources:
+            result.append("配置/术语依赖：" + "；".join(config_sources[:6]))
+        if other_sources:
+            result.append("其他输入依赖：" + "；".join(other_sources[:4]))
+        return result
+
+    @classmethod
+    def build_domain_logic_summary_payload(cls, domain: str, raw_payload: dict) -> dict:
+        """
+        基于源码证据生成通用业务化摘要。
+        这不是按域手写答案，而是把所有域共同的代码证据放进稳定叙述模板。
+        """
+        domain = (domain or "").upper()
+        role = cls.clean_domain_role(domain, raw_payload.get("domain_role"))
+        raw_inputs = [str(item).strip() for item in (raw_payload.get("input_sources") or []) if str(item).strip()]
+        raw_core = [str(item).strip() for item in (raw_payload.get("core_logic") or []) if str(item).strip()]
+        raw_time = [str(item).strip() for item in (raw_payload.get("time_point_logic") or []) if str(item).strip()]
+        raw_deps = [str(item).strip() for item in (raw_payload.get("dependencies") or []) if str(item).strip()]
+        raw_outputs = [str(item).strip() for item in (raw_payload.get("outputs") or []) if str(item).strip()]
+
+        function_line = next((item for item in raw_core if item.startswith("入口/辅助函数：")), "")
+        field_count_line = next((item for item in raw_core if "源码中识别到" in item), "")
+        preprocessing_line = next((item for item in raw_core if item.startswith("数据整理步骤：")), "")
+        examples = cls.split_domain_logic_examples(raw_core)
+
+        input_sources = cls.build_domain_input_summary(domain, raw_inputs)
+        if input_sources:
+            input_sources.insert(0, "转换入口读取的是几类来源，而不是单纯字段清单：本域数据、跨域参考数据、配置/术语数据。")
+
+        core_logic = cls.build_business_core_steps(domain, examples, preprocessing_line, field_count_line)
+        if function_line:
+            core_logic.append(f"源码入口依据：{function_line.replace('入口/辅助函数：', '')}")
+
+        time_point_logic = cls.build_business_time_steps(domain, raw_time)
+
+        dependencies = cls.build_domain_dependency_summary(raw_deps)
+        if dependencies:
+            dependencies.insert(0, "这里保留依赖来源摘要；具体字段证据来自源码索引，不再作为域级逻辑主答案逐项展开。")
+
+        outputs = cls.build_business_output_steps(raw_outputs)
+
+        return {
+            "domain_role": role,
+            "input_sources": input_sources or raw_inputs or None,
+            "core_logic": core_logic or raw_core or None,
+            "time_point_logic": time_point_logic or raw_time or None,
+            "dependencies": dependencies or raw_deps or None,
+            "outputs": outputs or raw_outputs or None,
+        }
+
+    @classmethod
+    def summarize_return_value_for_field(cls, field_name: str, value: str) -> str:
+        """
+        把函数 return dict 中和字段相关的值翻译成字段规则。
+        """
+        field = (field_name or "").upper()
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if text in {"'Predose'", '"Predose"'}:
+            return f"{field} 生成 Predose"
+        if "Postdose" in text or "_format_" in text:
+            return f"{field} 根据小时/分钟生成 Postdose 时间点"
+        if text in {"timepoint_str", "source_study_day"}:
+            return f"{field} 保留解析后的原始时间点/访视标签"
+        if text.startswith("parse_"):
+            return f"继续调用 {text} 解析时间点"
+        if text.startswith("'") or text.startswith('"'):
+            return f"{field} 取 {text.strip(chr(34)).strip(chr(39))}"
+        return f"{field} 来自 {text}"
+
+    @classmethod
+    def summarize_trace_rules(cls, field_name: str, trace: dict) -> tuple[list[str], list[str]]:
+        """
+        把函数追踪结果聚合成字段业务规则，避免逐条 return 分支刷屏。
+        """
+        field = (field_name or "").upper()
+        values = [str(item.get("value") or "").strip() for item in (trace.get("returns") or [])]
+        functions = {str(item.get("function") or "").strip() for item in (trace.get("returns") or [])}
+        rules = []
+        special_cases = []
+
+        if field.endswith("TPT") and values:
+            rules.append(
+                f"{field} 不是直接从原始列复制，而是先生成中间时间信息，再取其中的 `tpt`。"
+            )
+            if "resolve_vs_timing" in functions:
+                rules.append(
+                    "resolve_vs_timing 会结合原始 tpt、source_study_day、实际研究日 VSDY，以及是否存在给药参考记录来决定时间点。"
+                )
+            branch_rules = []
+            if any("'Predose'" == value or '"Predose"' == value for value in values):
+                branch_rules.append("BD / PREDOSE / 给药前 -> Predose")
+            if any("_format_" in value or "Postdose" in value for value in values):
+                branch_rules.append("AD 或带 H/MIN 的时间 -> Postdose 时间点")
+            if "timepoint_str" in values:
+                branch_rules.append("无法解析成明确给药前后时间时 -> 保留原始 timepoint")
+            if "source_study_day" in values:
+                branch_rules.append("访视标签且无明确给药前后、也无给药参考时 -> 使用 source_study_day")
+            if branch_rules:
+                rules.append("主要分支：" + "；".join(branch_rules))
+            return rules, special_cases
+
+        for returned in trace.get("returns") or []:
+            summary = cls.summarize_return_value_for_field(field, returned.get("value") or "")
+            if summary and summary not in rules:
+                rules.append(summary)
+        return rules, special_cases
+
+    @classmethod
+    def extract_field_related_outputs(cls, domain_code: str, field_name: str, entries: list[dict]) -> list[str]:
+        """
+        根据字段附近代码推断相关输出字段。
+        """
+        dependents = SendCodeIndexService.find_field_dependents(domain_code, field_name)
+        if dependents:
+            return [
+                f"{item['field']}: 代码行 {item['line']} 依赖 {field_name}"
+                for item in dependents[:8]
+            ]
+
+        field = (field_name or "").upper()
+        related = []
+        for entry in entries or []:
+            snippet = entry.get("snippet") or ""
+            for token in re.findall(r"\b[A-Z][A-Z0-9_]{2,}\b", snippet):
+                if token == field:
+                    continue
+                if field[:2] and token.startswith(field[:2]) and token not in related:
+                    related.append(token)
+        return related[:8]
+
+    @classmethod
+    def build_field_trace_payload_parts(cls, domain_code: str, field_name: str, entries: list[dict]) -> tuple[list[str], list[str], list[str]]:
+        """
+        对字段赋值中的本地变量依赖做追踪展开。
+        """
+        rules = []
+        dependencies = []
+        special_cases = []
+        for entry in entries or []:
+            expression = str(entry.get("expression") or "").strip()
+            match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\[['\"]([^'\"]+)['\"]\]", expression)
+            if not match:
+                continue
+            variable, key = match.group(1), match.group(2)
+            trace = SendCodeIndexService.find_variable_trace(domain_code, variable, key=key)
+            if not trace:
+                continue
+            trace_rules, trace_special_cases = cls.summarize_trace_rules(field_name, trace)
+            for item in trace_rules:
+                if item not in rules:
+                    rules.append(item)
+            for item in trace_special_cases:
+                if item not in special_cases:
+                    special_cases.append(item)
+            for assignment in trace.get("assignments") or []:
+                source_expr = assignment.get("expression") or ""
+                line = assignment.get("line")
+                text = f"中间变量 {variable} 在代码行 {line} 由 {source_expr} 生成，{field_name} 再取其中的 `{key}`。"
+                if text not in dependencies:
+                    dependencies.append(text)
+        return rules, dependencies, special_cases
+
+    @classmethod
+    def build_code_field_logic_answer(cls, query: str):
+        """
+        基于源码结构化索引回答字段计算逻辑。
+        """
+        domain_code = cls.extract_target_domain_code(query)
+        field_tokens = cls.extract_field_tokens(query)
+        field_name = field_tokens[-1] if field_tokens else None
+        result = SendCodeIndexService.find_field(domain_code, field_name)
+        if not result:
+            return None
+
+        entries = result["entries"]
+        calculation_rules = []
+        dependencies = []
+        evidence = []
+        for entry in entries[:5]:
+            expression = entry.get("expression") or ""
+            line = entry.get("line")
+            file_name = Path(entry.get("file") or "").name
+            if expression == result["field"]:
+                continue
+            if expression in {"''", '""', "None", "np.nan", "nan"}:
+                continue
+            if expression and expression not in calculation_rules:
+                calculation_rules.append(f"代码行 {line}: {expression}")
+            for dep in entry.get("dependencies") or []:
+                if dep not in dependencies:
+                    dependencies.append(dep)
+            if file_name and line:
+                evidence.append(f"{file_name}:{line}")
+
+        traced_rules, traced_dependencies, traced_special_cases = cls.build_field_trace_payload_parts(
+            domain_code,
+            result["field"],
+            entries
+        )
+        has_trace_rules = bool(traced_rules)
+        for item in traced_rules:
+            if item not in calculation_rules:
+                calculation_rules.append(item)
+        for item in traced_dependencies:
+            if item not in dependencies:
+                dependencies.append(item)
+        if has_trace_rules:
+            calculation_rules = [
+                item for item in calculation_rules
+                if "study_day_info['tpt']" not in item
+            ]
+
+        payload = {
+            "field_name": result["field"],
+            "calculation_rules": calculation_rules or None,
+            "dependencies": dependencies or None,
+            "special_cases": traced_special_cases or None,
+            "related_outputs": cls.extract_field_related_outputs(domain_code, result["field"], entries) or evidence or None,
+        }
+        answer = cls.render_field_logic_answer(payload)
+        if not answer:
+            return None
+        sources = [{
+            "task_id": None,
+            "kb_id": None,
+            "file_name": Path(entries[0].get("file") or "").name,
+            "section": f"代码索引: {result['domain']}.{result['field']}",
+            "chunk_index": entries[0].get("line"),
+            "score": 1.0,
+            "snippet": entries[0].get("snippet") or entries[0].get("expression") or ""
+        }]
+        return answer, payload, sources
+
+    @classmethod
+    def build_code_dependency_answer(cls, query: str):
+        """
+        基于源码结构化索引回答跨域字段依赖。
+        """
+        used_domain, target_domain = cls.extract_dependency_domains(query)
+        result = SendCodeIndexService.find_dependency(target_domain, used_domain)
+        if not result:
+            return None
+
+        relation_lines = []
+        sources = []
+        for field_name, entries in sorted(result["fields"].items()):
+            first = entries[0]
+            expression = first.get("expression") or ""
+            line = first.get("line")
+            file_name = Path(first.get("file") or "").name
+            relation_lines.append(f"{field_name}: 在 {target_domain} 域代码中被读取，代码行 {line}，表达式 `{expression}`")
+            sources.append({
+                "task_id": None,
+                "kb_id": None,
+                "file_name": file_name,
+                "section": f"代码索引: {target_domain} 使用 {used_domain}.{field_name}",
+                "chunk_index": line,
+                "score": 1.0,
+                "snippet": first.get("snippet") or expression
+            })
+
+        payload = {
+            "target_domain": target_domain,
+            "used_domain": used_domain,
+            "domain_role": f"{used_domain} 域字段在 {target_domain} 域转换代码中的使用情况。",
+            "direct_relations": relation_lines,
+            "design_relations": None,
+            "non_primary_relations": None,
+            "relation_conclusion": f"{target_domain} 域当前代码使用了 {used_domain} 域的 {len(result['fields'])} 个字段。"
+        }
+        answer = cls.render_domain_relation_answer(payload)
+        if not answer:
+            return None
+        return answer, payload, sources[:5]
+
+    @classmethod
+    def build_code_domain_logic_answer(cls, query: str):
+        """
+        基于源码结构化索引回答域自身整体转换逻辑。
+        这条链用于“某域整体逻辑/转换逻辑”这类问题，避免被跨域关系模板或输入字段清单污染。
+        """
+        domain_code = cls.extract_target_domain_code(query)
+        if not domain_code:
+            return None
+
+        domain = domain_code.upper()
+        raw_payload = SendCodeIndexService.find_domain_logic(domain)
+        if not raw_payload:
+            return None
+        payload = cls.build_domain_logic_summary_payload(domain, raw_payload)
+
+        answer = cls.render_domain_logic_answer(payload)
+        if not answer:
+            return None
+        source_file = f"{domain}.py"
+        sources = [{
+            "task_id": None,
+            "kb_id": None,
+            "file_name": source_file,
+            "section": f"代码索引: {domain} 域整体逻辑",
+            "chunk_index": None,
+            "score": 1.0,
+            "snippet": answer[:500],
+        }]
+        return answer, payload, sources
+
+    @classmethod
+    def is_dependency_reason_followup(cls, query: str, history_messages: list | None = None) -> bool:
+        """
+        判断当前问题是否在追问上一轮跨域字段依赖“为什么要用这些字段”。
+        """
+        if not history_messages:
+            return False
+        value = (query or "").strip()
+        if not value:
+            return False
+        if not any(flag in value for flag in ["为什么", "为啥", "原因", "干嘛", "作用", "用途"]):
+            return False
+        if not any(flag in value for flag in ["这些字段", "这些变量", "读取", "要用", "使用", "引用", "它们"]):
+            return False
+        previous = cls.get_last_assistant_structured_message(history_messages)
+        return bool(previous and previous.get("answer_type") == "domain_relation")
+
+    @classmethod
+    def infer_dependency_field_reason(cls, field_name: str, target_domain: str | None, used_domain: str | None) -> str:
+        """
+        根据字段名和源码索引用途生成稳定的字段用途解释。
+        """
+        field = (field_name or "").upper()
+        target = (target_domain or "目标").upper()
+        used = (used_domain or "来源").upper()
+        if field == "USUBJID":
+            return f"{field}: 用来把 {target} 记录和同一只动物/同一受试者的 {used} 给药记录对齐，避免拿到其他个体的给药时间。"
+        if field == "EXTPTNUM":
+            return f"{field}: 多次给药或多个给药时间点时，用它匹配当前 PC 记录的 Dose，确保引用的是同一次给药。"
+        if field in {"EXSTDY", "EXSTDTC"}:
+            if field.endswith("DY"):
+                return f"{field}: 用给药开始研究日匹配 PC 的名义采样日 PCNOMDY，主要服务 Predose 或 EXENDY 不存在时的兜底逻辑。"
+            return f"{field}: 取给药开始日期时间，作为 Predose 采样或无给药结束时间时的参考给药时间，填充 PCRFTDTC。"
+        if field in {"EXENDY", "EXENDTC"}:
+            if field.endswith("DY"):
+                return f"{field}: 用给药结束研究日匹配 PCNOMDY，Postdose 场景优先按给药结束日找对应给药记录。"
+            return f"{field}: 取给药结束日期时间，Postdose 场景优先用它作为参考给药时间，填充 PCRFTDTC。"
+        return f"{field}: 在 {target} 域转换代码中作为 {used} 域输入字段读取，用于筛选、匹配或生成目标域派生字段。"
+
+    @classmethod
+    def build_dependency_reason_followup_answer(cls, query: str, history_messages: list | None = None):
+        """
+        基于上一轮结构化跨域依赖结果，解释为什么需要这些字段。
+        """
+        if not cls.is_dependency_reason_followup(query, history_messages):
+            return None
+        previous = cls.get_last_assistant_structured_message(history_messages)
+        payload = previous.get("answer_payload") or {}
+        target_domain = payload.get("target_domain")
+        used_domain = payload.get("used_domain")
+        role = payload.get("domain_role") or ""
+        if not used_domain:
+            match = re.search(r"([A-Z]{2,})\s*域字段在\s*([A-Z]{2,})\s*域", role)
+            if match:
+                used_domain = match.group(1)
+                target_domain = target_domain or match.group(2)
+
+        direct_relations = payload.get("direct_relations") or []
+        fields = []
+        for item in direct_relations:
+            match = re.match(r"\s*([A-Z][A-Z0-9_]*)\s*:", str(item or ""))
+            if match and match.group(1) not in fields:
+                fields.append(match.group(1))
+        if not fields:
+            return None
+
+        reason_lines = [
+            cls.infer_dependency_field_reason(field, target_domain, used_domain)
+            for field in fields
+        ]
+        target = (target_domain or "目标").upper()
+        used = (used_domain or "来源").upper()
+        answer = "\n\n".join([
+            "核心原因\n"
+            f"{target} 域不是单独生成这些时间参考字段的，它需要用 {used} 域的给药记录来定位“这一次采样对应哪一次给药”。"
+            f"这些字段共同用于按个体、名义日和给药次数筛选 {used} 记录，然后把给药开始/结束时间写入 {target} 的参考时间字段。",
+            "字段作用\n" + "\n".join(f"- {line}" for line in reason_lines),
+            "结果影响\n"
+            "如果这些字段缺失或匹配不上，代码里的 PCRFTDTC 会为空，后续就无法准确说明 PC 采样相对哪一次给药。"
+        ])
+        explanation_payload = {
+            "applicable_stage": f"{target} 域生成参考给药时间阶段",
+            "calculation_steps": reason_lines,
+            "result_meaning": f"说明 {target} 为什么要读取 {used} 字段来生成 PCRFTDTC/PCTPTREF 等给药参考信息。",
+            "evidence": direct_relations,
+        }
+        return answer, explanation_payload, previous.get("sources") or []
 
     @classmethod
     def extract_domain_code_from_file(cls, file_name: str) -> str | None:
@@ -1815,7 +2645,14 @@ JSON schema:
         normalized_payload["direct_relations"] = merged_direct_relations or None
 
         if not normalized_payload.get("domain_role") and domain_code:
-            normalized_payload["domain_role"] = f"{domain_code.upper()}域作为给药时间基准域，为其他域提供研究日和参考时间的计算依据。"
+            role_map = {
+                "EX": "EX 域记录给药暴露信息，常为其他结果域提供给药日期、给药结束时间和研究日计算参考。",
+                "PC": "PC 域记录药物浓度/暴露结果；它通常读取给药和采样相关输入来生成浓度结果及参考给药时间，不是其他域的通用给药时间基准。",
+            }
+            normalized_payload["domain_role"] = role_map.get(
+                domain_code.upper(),
+                f"{domain_code.upper()} 域在 SEND 转换中提供本域结果数据；如需说明跨域关系，必须以检索到的字段引用证据为准。"
+            )
 
         if not normalized_payload.get("relation_conclusion") and merged_direct_relations:
             relation_domains = "、".join(item["domain"] for item in fallback_relations[:6])
@@ -2246,9 +3083,65 @@ JSON schema:
                     "contexts": []
                 }
 
+        dependency_reason = cls.build_dependency_reason_followup_answer(query, history_messages)
+        if dependency_reason:
+            answer, payload, previous_sources = dependency_reason
+            return {
+                "query": query,
+                "rewritten_query": None,
+                "answer": answer,
+                "answer_type": "explanation",
+                "answer_payload": payload,
+                "sources": previous_sources,
+                "contexts": []
+            }
+
         rewritten_query = cls.rewrite_query(query, history_messages)
         effective_query = rewritten_query or query
         intent = cls.classify_query_intent(effective_query)
+
+        if intent == "field_logic":
+            code_answer = cls.build_code_field_logic_answer(effective_query)
+            if code_answer:
+                answer, payload, sources = code_answer
+                return {
+                    "query": query,
+                    "rewritten_query": rewritten_query if rewritten_query != query else None,
+                    "answer": answer,
+                    "answer_type": "field_logic",
+                    "answer_payload": payload,
+                    "sources": sources,
+                    "contexts": []
+                }
+
+        if intent == "domain_relation":
+            code_answer = cls.build_code_dependency_answer(effective_query)
+            if code_answer:
+                answer, payload, sources = code_answer
+                return {
+                    "query": query,
+                    "rewritten_query": rewritten_query if rewritten_query != query else None,
+                    "answer": answer,
+                    "answer_type": "domain_relation",
+                    "answer_payload": payload,
+                    "sources": sources,
+                    "contexts": []
+                }
+
+        if intent == "domain_logic":
+            code_answer = cls.build_code_domain_logic_answer(effective_query)
+            if code_answer:
+                answer, payload, sources = code_answer
+                return {
+                    "query": query,
+                    "rewritten_query": rewritten_query if rewritten_query != query else None,
+                    "answer": answer,
+                    "answer_type": "domain_logic",
+                    "answer_payload": payload,
+                    "sources": sources,
+                    "contexts": []
+                }
+
         search_top_k = top_k
         if intent == "field_logic":
             search_top_k = max(search_top_k, 8)
@@ -2485,15 +3378,7 @@ JSON schema:
         session.commit()
         session.refresh(conversation)
 
-        return {
-            "id": conversation.id,
-            "title": conversation.title,
-            "kb_id": conversation.kb_id,
-            "tone": conversation.tone,
-            "created_at": cls._format_dt(conversation.created_at),
-            "updated_at": cls._format_dt(conversation.updated_at),
-            "last_message": None
-        }
+        return cls.serialize_conversation(conversation)
 
     @classmethod
     def list_conversations(cls, session):
@@ -2509,17 +3394,41 @@ JSON schema:
                 .order_by(ConversationMessage.created_at.desc()) \
                 .first()
 
-            items.append({
-                "id": conversation.id,
-                "title": conversation.title or "新会话",
-                "kb_id": conversation.kb_id,
-                "tone": conversation.tone,
-                "created_at": cls._format_dt(conversation.created_at),
-                "updated_at": cls._format_dt(conversation.updated_at),
-                "last_message": last_message.content[:80] if last_message else None
-            })
+            items.append(cls.serialize_conversation(conversation, last_message=last_message))
 
         return items
+
+    @classmethod
+    def update_conversation(cls, conversation_id: str, req, session):
+        """
+        修改会话标题。
+        """
+        conversation = cls.get_conversation_or_404(conversation_id, session)
+        title = (req.title or "").strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="title is required")
+        conversation.title = title[:80]
+        conversation.updated_at = datetime.now()
+        session.commit()
+        session.refresh(conversation)
+        last_message = session.query(ConversationMessage) \
+            .filter(ConversationMessage.conversation_id == conversation.id) \
+            .order_by(ConversationMessage.created_at.desc()) \
+            .first()
+        return cls.serialize_conversation(conversation, last_message=last_message)
+
+    @classmethod
+    def delete_conversation(cls, conversation_id: str, session):
+        """
+        删除会话及其所有消息。
+        """
+        conversation = cls.get_conversation_or_404(conversation_id, session)
+        session.query(ConversationMessage) \
+            .filter(ConversationMessage.conversation_id == conversation.id) \
+            .delete(synchronize_session=False)
+        session.delete(conversation)
+        session.commit()
+        return True
 
     @classmethod
     def get_conversation_messages(cls, conversation_id: str, session):

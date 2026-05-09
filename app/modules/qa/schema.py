@@ -43,7 +43,11 @@ class QaAnswerPayload(BaseModel):
     supplemental_outputs: Optional[list[str]] = None  # workflow：补充输出
     final_outputs: Optional[list[str]] = None       # workflow：最终输出
     target_domain: Optional[str] = None             # domain_relation：目标域代码
+    used_domain: Optional[str] = None               # domain_relation：被目标域读取/引用的域代码
     domain_role: Optional[str] = None               # domain/domain_relation：域角色定位
+    core_logic: Optional[list[str]] = None          # domain_logic：核心转换逻辑
+    time_point_logic: Optional[list[str]] = None    # domain_logic：时间点/研究日/基线逻辑
+    outputs: Optional[list[str]] = None             # domain_logic：输出字段和输出处理
     direct_relations: Optional[list[str]] = None    # domain_relation：直接依赖关系
     design_relations: Optional[list[str]] = None    # domain_relation：设计层关系
     non_primary_relations: Optional[list[str]] = None  # domain_relation：非主要关系
@@ -80,6 +84,13 @@ class ConversationCreate(BaseModel):
     title: Optional[str] = None                     # 会话标题
     kb_id: Optional[str] = None                     # 默认知识库 ID
     tone: Optional[str] = None                      # 默认回答语气
+
+
+class ConversationUpdate(BaseModel):
+    """
+    说明：ConversationUpdate 类，用于修改会话基础信息。
+    """
+    title: Optional[str] = None                     # 会话标题
 
 
 class ConversationResponse(BaseModel):

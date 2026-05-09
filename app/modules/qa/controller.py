@@ -8,6 +8,7 @@ from app.modules.qa.schema import (
     ConversationResponse,
     ConversationTurnResponse,
     ConversationMessageCreate,
+    ConversationUpdate,
     QaRequest,
     QaResponse,
 )
@@ -53,6 +54,29 @@ def list_conversations(session: Session = Depends(get_db)):
     :return:
     """
     return QaService.list_conversations(session)
+
+
+@qa_router.patch("/conversations/{conversation_id}", response_model=ConversationResponse, summary="重命名会话")
+def update_conversation(conversation_id: str, req: ConversationUpdate, session: Session = Depends(get_db)):
+    """
+    修改会话信息
+    :param conversation_id:
+    :param req:
+    :param session:
+    :return:
+    """
+    return QaService.update_conversation(conversation_id, req, session)
+
+
+@qa_router.delete("/conversations/{conversation_id}", summary="删除会话")
+def delete_conversation(conversation_id: str, session: Session = Depends(get_db)):
+    """
+    删除会话及其消息
+    :param conversation_id:
+    :param session:
+    :return:
+    """
+    return QaService.delete_conversation(conversation_id, session)
 
 
 @qa_router.get("/conversations/{conversation_id}/messages", response_model=ConversationMessagesResponse, summary="获取会话消息")
