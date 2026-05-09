@@ -38,9 +38,10 @@ jobs:
             New-Item -ItemType Directory -Path $targetDir | Out-Null
           }
 
-          robocopy $sourceDir $targetDir /MIR /XD .git .github .venv __pycache__ /XF deploy.ps1
+          robocopy $sourceDir $targetDir /MIR /XD .git .github .venv __pycache__ /XF deploy.ps1 /R:3 /W:5
 
           $code = $LASTEXITCODE
+
           if ($code -le 7) {
             Write-Host "代码同步成功，robocopy exit code: $code"
             exit 0
