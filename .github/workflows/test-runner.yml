@@ -1,18 +1,20 @@
 name: Deploy to WinServer
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: [self-hosted, Windows, x64, winserver]
 
     steps:
-      - name: Download latest code by ZIP
+      - name: 下载最新代码并同步到服务器
         shell: powershell
         run: |
+          chcp 65001
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $OutputEncoding = [System.Text.Encoding]::UTF8
+
           $ErrorActionPreference = "Stop"
 
           $zipUrl = "https://github.com/kiko-zhu/AI-Knowledge-Engine/archive/refs/heads/main.zip"
@@ -38,7 +40,7 @@ jobs:
             New-Item -ItemType Directory -Path $targetDir | Out-Null
           }
 
-          robocopy $sourceDir $targetDir /MIR /XD .git .github .venv __pycache__ /XF deploy.ps1 /R:3 /W:5
+          robocopy $sourceDir $targetDir /MIR /XD .git .github .venv __pycache__ /XF deploy.ps1 test.db /R:3 /W:5
 
           $code = $LASTEXITCODE
 
@@ -50,7 +52,11 @@ jobs:
             exit $code
           }
 
-      - name: Run deploy script
+      - name: 执行部署脚本
         shell: powershell
         run: |
+          chcp 65001
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $OutputEncoding = [System.Text.Encoding]::UTF8
+
           powershell -ExecutionPolicy Bypass -File C:\apps\AI-Knowledge-Engine\deploy.ps1
